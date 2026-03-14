@@ -28,7 +28,7 @@ jobs:
         run: npx playwright install chromium --with-deps
 
       - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ secrets.GOST_PROXY != '' }}
+        if: env.GOST_PROXY != ''
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
@@ -44,7 +44,7 @@ jobs:
         env:
           DISCORD_ACCOUNT: ${{ secrets.DISCORD_ACCOUNT }}
           TG_BOT:          ${{ secrets.TG_BOT }}
-          GOST_PROXY:      ${{ secrets.GOST_PROXY != '' && 'http://127.0.0.1:8080' || '' }}
+          GOST_PROXY:      http://127.0.0.1:8080
         run: npx playwright test tests/freeze.js
 
       - name: 📸 上传失败截图

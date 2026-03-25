@@ -12,7 +12,7 @@
 
 | 🔑 Secret 名称 | 📝 格式 | ✅ 必填 |
 |---|---|---|
-| `DISCORD_TOKEN` | `你的 Discord Token` | ✅ |
+| `DISCORD_TOKEN` | `Discord Token (多个用逗号 , 隔开)` | ✅ |
 | `TG_BOT` | `chat_id,bot_token` | ✅ |
 | `GOST_PROXY` | `socks5://host:port` | 可选 |
 

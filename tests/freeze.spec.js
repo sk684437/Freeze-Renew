@@ -2,7 +2,8 @@
 const { test, expect, chromium } = require('@playwright/test');
 const https = require('https');
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const tokensInput = process.env.DISCORD_TOKEN || '';
+const tokens = tokensInput.split(',').map(t => t.trim()).filter(Boolean);
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 60000;
@@ -27,7 +28,7 @@ function sendTG(result) {
             `🎮 FreezeHost 续期通知`,
             `🕐 运行时间: ${nowStr()}`,
             `🖥 服务器: FreezeHost Free`,
-            `📊 续期结果: ${result}`,
+            `📊 续期结果: \n${result}`,
         ].join('\n');
 
         const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: msg });
@@ -121,8 +122,8 @@ async function handleOAuthPage(page) {
 }
 
 test('FreezeHost 自动续期', async () => {
-    if (!DISCORD_TOKEN) {
-        throw new Error('❌ 缺少 DISCORD_TOKEN 环境变量');
+    if (tokens.length === 0) {
+        throw new Error('❌ 缺少 DISCORD_TOKEN 环境变量，请配置');
     }
 
     let proxyConfig = undefined;
@@ -145,219 +146,274 @@ test('FreezeHost 自动续期', async () => {
         }
     }
 
-    console.log('🔧 启动浏览器...');
+    console.log(`🔧 启动浏览器 (共需处理 ${tokens.length} 个账号)...`);
     const browser = await chromium.launch({
         headless: true,
         proxy: proxyConfig,
     });
-    const page = await browser.newPage();
-    page.setDefaultTimeout(TIMEOUT);
-    console.log('🚀 浏览器就绪！');
 
     try {
-        // ── 出口 IP 验证 ──────────────────────────────────────
+        // ── 出口 IP 验证（仅测一次） ─────────────────────────
         console.log('🌐 验证出口 IP...');
         try {
-            const res = await page.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded' });
+            const ipPage = await browser.newPage();
+            const res = await ipPage.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded', timeout: 10000 });
             const body = await res.text();
             const ip = JSON.parse(body).ip || body;
             const masked = ip.replace(/(\d+\.\d+\.\d+\.)\d+/, '$1xx');
             console.log(`✅ 出口 IP 确认：${masked}`);
+            await ipPage.close();
         } catch {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
-        // ── 预登录 Discord ────────────────────────────────────
-        console.log('🔑 使用 Token 预登录 Discord...');
-        await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
-        
-        await page.evaluate((token) => {
-            const iframe = document.createElement('iframe');
-            document.body.appendChild(iframe);
-            iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
-        }, DISCORD_TOKEN);
-        
-        console.log('🔄 刷新页面验证 Token...');
-        await page.waitForTimeout(1000);
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(3000);
-        
-        if (page.url().includes('login')) {
-            await sendTG('❌ Discord Token 无效或被踢出，无法登录');
-            throw new Error('❌ Discord Token 失效或被踢出，登录失败');
-        }
-        console.log('✅ Discord Token 验证有效...');
+        let allSummary = [];
+        let globalHasError = false;
 
-        // ── 登录 FreezeHost ───────────────────────────────────
-        console.log('🔑 打开 FreezeHost 登录页...');
-        await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
-
-        console.log('📤 点击 Login with Discord...');
-        await page.click('span.text-lg:has-text("Login with Discord")');
-
-        console.log('⏳ 等待服务条款弹窗...');
-        const confirmBtn = page.locator('button#confirm-login');
-        await confirmBtn.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
-        if (await confirmBtn.isVisible()) {
-            await confirmBtn.click();
-            console.log('✅ 已接受服务条款');
-        }
-
-        // ── OAuth 授权 ────────────────────────────────────────
-         console.log('⏳ 等待 OAuth 授权...');
-         try {
-             await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 6000 });
-             console.log('🔍 进入 OAuth 授权页，处理中...');
-             await page.waitForTimeout(2000);
-             
-             if (page.url().includes('discord.com')) {
-                 await handleOAuthPage(page);
-             } else {
-                 console.log('✅ 已自动完成授权，无需手动点击');
-             }
-             
-             await page.waitForURL(/free\.freezehost\.pro/, { timeout: 15000 });
-             console.log(`✅ 已离开 Discord，当前：${page.url()}`);
-         } catch {
-             console.log(`✅ 静默授权或已跳转，当前：${page.url()}`);
-         }
-
-        // ── 确认到达 Dashboard ────────────────────────────────
-        console.log('⏳ 确认到达 Dashboard...');
-        try {
-            await page.waitForURL(
-                url => url.includes('/callback') || url.includes('/dashboard'),
-                { timeout: 10000 }
-            );
-        } catch { /* 可能已经在 dashboard */ }
-
-        if (page.url().includes('/callback')) {
-            await page.waitForURL(/free\.freezehost\.pro\/dashboard/);
-        }
-
-        if (!page.url().includes('/dashboard')) {
-            throw new Error(`❌ 未到达 Dashboard，当前 URL: ${page.url()}`);
-        }
-        console.log(`✅ 登录成功！当前：${page.url()}`);
-
-        // ── 查找所有 Server Console 链接 ───────────────────────
-        console.log('🔍 查找所有 Server 的 Manage 按钮...');
-        await page.waitForTimeout(3000);
-
-        const serverUrls = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="server-console"]'));
-            return links.map(link => link.href);
-        });
-
-        if (serverUrls.length === 0) {
-            throw new Error('❌ 未找到任何 server-console 链接，可能是没有服务器或页面加载失败');
-        }
-
-        console.log(`✅ 共找到 ${serverUrls.length} 个服务器`);
-
-        let summary = [];
-        let hasError = false;
-
-        // ── 遍历处理每个 Server ───────────────────────────────
-        for (let i = 0; i < serverUrls.length; i++) {
-            const sUrl = serverUrls[i];
-            console.log(`\n▶️ 开始处理第 ${i + 1}/${serverUrls.length} 个服务器`);
-            console.log(`  🔗 ${sUrl}`);
-            await page.goto(sUrl, { waitUntil: 'domcontentloaded' });
+        // ── 遍历处理每个 Token 账号 ─────────────────────────
+        for (let tIndex = 0; tIndex < tokens.length; tIndex++) {
+            const currentToken = tokens[tIndex];
+            const accountLabel = `【账号 ${tIndex + 1}】`;
             
-            await page.waitForTimeout(3000);
+            console.log('\n' + '='.repeat(50));
+            console.log(`🚀 开始处理 ${accountLabel}`);
+            console.log('='.repeat(50));
+
+            // 每个账号使用独立的上下文，隔离 Cookie 和 LocalStorage
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            page.setDefaultTimeout(TIMEOUT);
             
-            let serverLabel = `[Server ${i+1}]`;
-
-            const renewalStatusText = await page.evaluate(() => {
-                const el = document.getElementById('renewal-status-console');
-                return el ? el.innerText.trim() : null;
-            });
-
-            console.log(`  📋 续期状态：${renewalStatusText}`);
-
-            let shouldRenew = true;
-            if (renewalStatusText) {
-                const daysMatch = renewalStatusText.match(/(\d+(?:\.\d+)?)\s*day/i);
-                const remainingDays = daysMatch ? parseFloat(daysMatch[1]) : null;
-
-                if (remainingDays !== null) {
-                    console.log(`  ⏳ 剩余天数：${remainingDays}`);
-                    if (remainingDays > 7) {
-                        const msg = `⏰ 剩余 ${remainingDays} 天 (需 ≤7 天)`;
-                        summary.push(`- ${serverLabel}: 无需续期 (${msg})`);
-                        console.log('  ' + msg);
-                        shouldRenew = false;
-                    } else {
-                        console.log(`  ✅ 剩余 ${remainingDays} 天，需要续期，继续操作...`);
-                    }
-                }
-            }
-
-            if (!shouldRenew) continue;
-
-            // ── 点击外链图标打开续期弹窗 ─────────────────────────
-            console.log('  🔍 查找续期入口...');
             try {
-                const externalLinkIcon = page.locator('i.fa-external-link-alt').first();
-                const parentEl = externalLinkIcon.locator('xpath=..');
-                await parentEl.waitFor({ state: 'visible', timeout: 8000 });
-                await parentEl.hover();
-                await page.waitForTimeout(1000);
-                await externalLinkIcon.click({ force: true });
-                await page.waitForTimeout(2000);
-
-                const renewModalBtn = page.locator('#renew-link-modal');
-                await renewModalBtn.waitFor({ state: 'visible', timeout: 5000 });
-                const btnText = (await renewModalBtn.innerText()).trim();
-
-                if (!btnText.toLowerCase().includes('renew instance')) {
-                    summary.push(`- ${serverLabel}: 尚未到续期时间`);
-                    console.log('  ⏰ 尚未到续期时间，跳过');
-                    continue;
-                }
-
-                const renewHref = await renewModalBtn.getAttribute('href');
-                if (!renewHref || renewHref === '#') throw new Error('无效的续期链接');
-
-                const renewAbsUrl = new URL(renewHref, page.url()).href;
-                console.log(`  📤 跳转 RENEW 链接...`);
-                await page.goto(renewAbsUrl, { waitUntil: 'domcontentloaded' });
-                await page.waitForURL(url => url.toString().includes('/dashboard') || url.toString().includes('/server-console'), { timeout: 30000 });
+                // ── 预登录 Discord ────────────────────────────────────
+                console.log('🔑 使用 Token 预登录 Discord...');
+                await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
                 
-                const finalUrl = page.url();
-                if (finalUrl.includes('success=RENEWED')) {
-                    console.log('  🎉 续期成功！');
-                    summary.push(`- ${serverLabel}: ✅ 续期成功`);
-                } else if (finalUrl.includes('err=CANNOTAFFORDRENEWAL')) {
-                    console.log('  ⚠️ 余额不足，无法续期');
-                    summary.push(`- ${serverLabel}: ⚠️ 余额不足`);
-                } else if (finalUrl.includes('err=TOOEARLY')) {
-                    console.log('  ⏰ 尚未到续期时间');
-                    summary.push(`- ${serverLabel}: ⏰ 尚未到时间`);
-                } else {
-                    summary.push(`- ${serverLabel}: ❓ 结果未知`);
-                    console.log(`  ⚠️ 续期结果未知：${finalUrl}`);
+                await page.evaluate((token) => {
+                    const iframe = document.createElement('iframe');
+                    document.body.appendChild(iframe);
+                    iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
+                }, currentToken);
+                
+                console.log('🔄 刷新页面验证 Token...');
+                await page.waitForTimeout(1000);
+                await page.reload({ waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(3000);
+                
+                if (page.url().includes('login')) {
+                    throw new Error('Discord Token 失效或被踢出，登录失败');
                 }
+                console.log('✅ Discord Token 验证有效...');
+
+                // ── 登录 FreezeHost ───────────────────────────────────
+                console.log('🔑 打开 FreezeHost 登录页...');
+                await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
+
+                console.log('📤 点击 Login with Discord...');
+                await page.click('span.text-lg:has-text("Login with Discord")');
+
+                console.log('⏳ 等待服务条款弹窗...');
+                const confirmBtn = page.locator('button#confirm-login');
+                await confirmBtn.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+                if (await confirmBtn.isVisible()) {
+                    await confirmBtn.click();
+                    console.log('✅ 已接受服务条款');
+                }
+
+                // ── OAuth 授权 ────────────────────────────────────────
+                console.log('⏳ 等待 OAuth 授权...');
+                try {
+                    await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 6000 });
+                    console.log('🔍 进入 OAuth 授权页，处理中...');
+                    await page.waitForTimeout(2000);
+                    
+                    if (page.url().includes('discord.com')) {
+                        await handleOAuthPage(page);
+                    } else {
+                        console.log('✅ 已自动完成授权，无需手动点击');
+                    }
+                    
+                    await page.waitForURL(/free\.freezehost\.pro/, { timeout: 15000 });
+                    console.log(`✅ 已离开 Discord，当前：${page.url()}`);
+                } catch {
+                    console.log(`✅ 静默授权或已跳转，当前：${page.url()}`);
+                }
+
+                // ── 确认到达 Dashboard ────────────────────────────────
+                console.log('⏳ 确认到达 Dashboard...');
+                try {
+                    await page.waitForURL(
+                        url => url.includes('/callback') || url.includes('/dashboard'),
+                        { timeout: 10000 }
+                    );
+                } catch { /* 可能已经在 dashboard */ }
+
+                if (page.url().includes('/callback')) {
+                    await page.waitForURL(/free\.freezehost\.pro\/dashboard/);
+                }
+
+                if (!page.url().includes('/dashboard')) {
+                    throw new Error(`未到达 Dashboard，当前 URL: ${page.url()}`);
+                }
+                console.log(`✅ 登录成功！当前：${page.url()}`);
+                await page.waitForTimeout(3000);
+
+                // ── 提取金币余额 ──────────────────────────────────────
+                console.log('🔍 提取当前金币余额...');
+                let coins = '未知';
+                try {
+                    const coinText = await page.evaluate(() => {
+                        const coinIcon = document.querySelector('.fa-coins');
+                        if (coinIcon && coinIcon.parentElement) {
+                            return coinIcon.parentElement.innerText.trim();
+                        }
+                        const elements = Array.from(document.querySelectorAll('span, div, p, h1, h2, h3, h4, h5, h6, b, strong'));
+                        for (const el of elements) {
+                            if (el.innerText && el.innerText.includes('Coins') && el.innerText.length < 20) {
+                                return el.innerText.trim();
+                            }
+                        }
+                        return '未知';
+                    });
+                    
+                    const match = coinText.match(/[\d,]+(\.\d+)?/);
+                    if (match) {
+                        coins = match[0];
+                    }
+                    console.log(`💰 当前金币: ${coins}`);
+                } catch (e) {
+                    console.log('⚠️ 获取金币失败');
+                }
+                
+                allSummary.push(`${accountLabel} 💰金币: ${coins}`);
+
+                // ── 查找所有 Server Console 链接 ───────────────────────
+                console.log('🔍 查找所有 Server 的 Manage 按钮...');
+                const serverUrls = await page.evaluate(() => {
+                    const links = Array.from(document.querySelectorAll('a[href*="server-console"]'));
+                    return links.map(link => link.href);
+                });
+
+                if (serverUrls.length === 0) {
+                    allSummary.push(`   ❌ 没有找到服务器`);
+                    console.log('⚠️ 未找到任何服务器');
+                    continue; 
+                }
+
+                console.log(`✅ 共找到 ${serverUrls.length} 个服务器`);
+
+                // ── 遍历处理该账号下的每个 Server ─────────────────────
+                for (let i = 0; i < serverUrls.length; i++) {
+                    const sUrl = serverUrls[i];
+                    console.log(`\n▶️ 开始处理第 ${i + 1}/${serverUrls.length} 个服务器`);
+                    console.log(`  🔗 ${sUrl}`);
+                    await page.goto(sUrl, { waitUntil: 'domcontentloaded' });
+                    
+                    await page.waitForTimeout(3000);
+                    
+                    let serverLabel = `   [Server ${i+1}]`;
+
+                    const renewalStatusText = await page.evaluate(() => {
+                        const el = document.getElementById('renewal-status-console');
+                        return el ? el.innerText.trim() : null;
+                    });
+
+                    console.log(`  📋 续期状态：${renewalStatusText}`);
+
+                    let shouldRenew = true;
+                    if (renewalStatusText) {
+                        const daysMatch = renewalStatusText.match(/(\d+(?:\.\d+)?)\s*day/i);
+                        const remainingDays = daysMatch ? parseFloat(daysMatch[1]) : null;
+
+                        if (remainingDays !== null) {
+                            console.log(`  ⏳ 剩余天数：${remainingDays}`);
+                            if (remainingDays > 7) {
+                                const msg = `剩余 ${remainingDays} 天 (需 ≤7 天)`;
+                                allSummary.push(`${serverLabel}: 无需 (${msg})`);
+                                console.log('  ' + msg);
+                                shouldRenew = false;
+                            } else {
+                                console.log(`  ✅ 剩余 ${remainingDays} 天，需要续期，继续操作...`);
+                            }
+                        }
+                    }
+
+                    if (!shouldRenew) continue;
+
+                    // ── 点击外链图标打开续期弹窗 ─────────────────────────
+                    console.log('  🔍 查找续期入口...');
+                    try {
+                        const externalLinkIcon = page.locator('i.fa-external-link-alt').first();
+                        const parentEl = externalLinkIcon.locator('xpath=..');
+                        await parentEl.waitFor({ state: 'visible', timeout: 8000 });
+                        await parentEl.hover();
+                        await page.waitForTimeout(1000);
+                        await externalLinkIcon.click({ force: true });
+                        await page.waitForTimeout(2000);
+
+                        const renewModalBtn = page.locator('#renew-link-modal');
+                        await renewModalBtn.waitFor({ state: 'visible', timeout: 5000 });
+                        const btnText = (await renewModalBtn.innerText()).trim();
+
+                        if (!btnText.toLowerCase().includes('renew instance')) {
+                            allSummary.push(`${serverLabel}: 尚未到续期时间`);
+                            console.log('  ⏰ 尚未到续期时间，跳过');
+                            continue;
+                        }
+
+                        const renewHref = await renewModalBtn.getAttribute('href');
+                        if (!renewHref || renewHref === '#') throw new Error('无效的续期链接');
+
+                        const renewAbsUrl = new URL(renewHref, page.url()).href;
+                        console.log(`  📤 跳转 RENEW 链接...`);
+                        await page.goto(renewAbsUrl, { waitUntil: 'domcontentloaded' });
+                        await page.waitForURL(url => url.toString().includes('/dashboard') || url.toString().includes('/server-console'), { timeout: 30000 });
+                        
+                        const finalUrl = page.url();
+                        if (finalUrl.includes('success=RENEWED')) {
+                            console.log('  🎉 续期成功！');
+                            allSummary.push(`${serverLabel}: ✅ 续期成功`);
+                        } else if (finalUrl.includes('err=CANNOTAFFORDRENEWAL')) {
+                            console.log('  ⚠️ 余额不足，无法续期');
+                            allSummary.push(`${serverLabel}: ⚠️ 余额不足`);
+                        } else if (finalUrl.includes('err=TOOEARLY')) {
+                            console.log('  ⏰ 尚未到续期时间');
+                            allSummary.push(`${serverLabel}: ⏰ 尚未到时间`);
+                        } else {
+                            allSummary.push(`${serverLabel}: ❓ 结果未知`);
+                            console.log(`  ⚠️ 续期结果未知：${finalUrl}`);
+                        }
+                    } catch (err) {
+                        console.log(`  ❌ 处理此服务器时发生错误: ${err.message}`);
+                        allSummary.push(`${serverLabel}: ❌ 处理失败 (${err.message.slice(0, 30)})`);
+                        globalHasError = true;
+                    }
+                } // End Server Loop
             } catch (err) {
-                console.log(`  ❌ 处理此服务器时发生错误: ${err.message}`);
-                summary.push(`- ${serverLabel}: ❌ 处理失败 (${err.message.slice(0, 30)})`);
-                hasError = true;
+                console.log(`❌ 账号 ${tIndex + 1} 发生异常: ${err.message}`);
+                allSummary.push(`${accountLabel} ❌ 登录或处理失败 (${err.message.slice(0, 30)})`);
+                globalHasError = true;
+            } finally {
+                await context.close();
             }
-        }
+        } // End Token Loop
 
         // ── 发送总体通知 ──────────────────────────────────────
         console.log('\n📄 最终执行报告:');
-        console.log(summary.join('\n'));
-        await sendTG(`📝 服务器检查处理完毕:\n${summary.join('\n')}`);
+        const finalPushText = allSummary.join('\n');
+        console.log(finalPushText);
+        
+        if (tokens.length > 0) {
+            await sendTG(finalPushText);
+        }
 
-        if (hasError) {
-            throw new Error('部分服务器续期过程中发生错误，请查看日志');
+        if (globalHasError) {
+            throw new Error('部分账号或服务器续期过程中发生错误，请查看日志');
         }
 
     } catch (e) {
-        if (!e.message?.includes('余额不足') && !e.message?.includes('部分服务器续期过程')) {
-            await sendTG(`❌ 脚本异常：${e.message}`);
+        if (!e.message?.includes('由于部分服务器') && !e.message?.includes('部分账号或服务器')) {
+            await sendTG(`❌ 脚本全局异常：${e.message}`);
         }
         throw e;
 

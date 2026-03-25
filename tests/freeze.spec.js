@@ -102,7 +102,7 @@ async function handleOAuthPage(page) {
                     break;
                 }
 
-                await btn.click();
+                await btn.click({ force: true });
                 console.log(`  ✅ 已点击: "${text}"`);
                 await page.waitForTimeout(2000);
 
@@ -171,13 +171,25 @@ test('FreezeHost 自动续期', async () => {
         console.log('🔑 打开 FreezeHost 登录页...');
         await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
 
+        // 【修复点 1】尝试移除可能存在的 Cookie 弹窗遮挡
+        try {
+            await page.evaluate(() => {
+                const consentRoot = document.querySelector('.fc-consent-root');
+                if (consentRoot) consentRoot.remove();
+            });
+        } catch (e) {
+            console.log('ℹ️ 无需清理弹窗遮挡或清理失败');
+        }
+
         console.log('📤 点击 Login with Discord...');
-        await page.click('span.text-lg:has-text("Login with Discord")');
+        // 【修复点 2】加上 force: true，防止被其他透明遮罩层拦截
+        await page.locator('span.text-lg:has-text("Login with Discord")').click({ force: true });
 
         console.log('⏳ 等待服务条款弹窗...');
         const confirmBtn = page.locator('button#confirm-login');
         await confirmBtn.waitFor({ state: 'visible' });
-        await confirmBtn.click();
+        // 【修复点 3】核心报错修复：强制点击确认按钮
+        await confirmBtn.click({ force: true });
         console.log('✅ 已接受服务条款');
 
         console.log('⏳ 等待跳转 Discord 登录页...');
@@ -188,7 +200,7 @@ test('FreezeHost 自动续期', async () => {
         await page.fill('input[name="password"]', DISCORD_PASSWORD);
 
         console.log('📤 提交登录请求...');
-        await page.click('button[type="submit"]');
+        await page.locator('button[type="submit"]').click({ force: true });
         await page.waitForTimeout(2000);
 
         if (/discord\.com\/login/.test(page.url())) {

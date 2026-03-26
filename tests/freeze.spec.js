@@ -29,6 +29,7 @@ function sendTG(result) {
             `🕐 时间: ${nowStr()}`,
             `========================`,
             `${result}`,
+            `🌐 官网入口: https://free.freezehost.pro`
         ].join('\n');
 
         const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: msg });

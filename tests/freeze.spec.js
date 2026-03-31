@@ -446,36 +446,31 @@ test('FreezeHost 自动续期', async ({}, testInfo) => {
                         continue;
                     }
 
-                    // ── 点击外链图标打开续期弹窗 ─────────────────────────
+                    // ── 查找并提取续期链接 ─────────────────────────
                     console.log('  🔍 查找续期入口...');
                     try {
-                        // 只匹配可见的外链图标，跳过隐藏的 reviewAction 等按钮
-                        // Cookie 弹窗已由 addInitScript 全局自动处理
-                        const externalLinkIcon = page.locator('i.fa-external-link-alt:visible').first();
-                        const parentEl = externalLinkIcon.locator('xpath=..');
-                        await parentEl.waitFor({ state: 'visible', timeout: 8000 });
-                        // force:true 忽略残留的遮罩层
-                        await parentEl.hover({ force: true });
-                        await page.waitForTimeout(500);
-                        await externalLinkIcon.click({ force: true });
-                        await page.waitForTimeout(2000);
-
+                        // 1. 直接获取续期按钮元素（状态改为 'attached'，无论是否隐藏只要在 DOM 里就能抓到）
                         const renewModalBtn = page.locator('#renew-link-modal');
-                        await renewModalBtn.waitFor({ state: 'visible', timeout: 5000 });
-                        const btnText = (await renewModalBtn.innerText()).trim();
+                        await renewModalBtn.waitFor({ state: 'attached', timeout: 5000 });
+
+                        // 2. Playwright 对于隐藏元素 innerText() 会返回空，所以改用 evaluate 直接读取 textContent
+                        const btnText = (await renewModalBtn.evaluate(el => el.textContent)).trim();
 
                         if (!btnText.toLowerCase().includes('renew instance')) {
                             statusText = `⏰ 未到续期条件`;
-                            console.log('  ⏰ 尚未到续期时间，跳过');
+                            console.log(`  ⏰ 尚未到续期时间，跳过 (当前按钮文本: ${btnText})`);
                             pushResult();
                             continue;
                         }
 
+                        // 3. 提取 href 链接
                         const renewHref = await renewModalBtn.getAttribute('href');
                         if (!renewHref || renewHref === '#') throw new Error('无效的续期链接');
 
+                        // 4. 拼装为绝对路径后，直接强制跳转！
                         const renewAbsUrl = new URL(renewHref, page.url()).href;
-                        console.log(`  📤 跳转 RENEW 链接...`);
+                        console.log(`  📤 直接跳转 RENEW 链接: ${renewAbsUrl}`);
+                        
                         await page.goto(renewAbsUrl, { waitUntil: 'domcontentloaded' });
                         await page.waitForURL(url => url.toString().includes('/dashboard') || url.toString().includes('/server-console'), { timeout: 30000 });
                         
